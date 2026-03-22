@@ -38,25 +38,26 @@ function generateSongId(albumId, trackNum) {
 // Upload song endpoint
 app.post('/upload', upload.single('song'), async (req, res) => {
   try {
-    const { albumId, title } = req.body;
     const file = req.file;
-    if (!file || !albumId || !title) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    if (!file) {
+      return res.status(400).json({ error: 'No audio file uploaded.' });
     }
 
-    // Extract cover image (if present)
+    // Extract metadata from audio file
+    const metadata = await parseFile(file.path);
+    const { title, artist, album } = metadata.common;
     let coverBuffer = null;
     let coverMime = null;
-    let trackNum = songs.filter(s => s.albumId === albumId).length + 1;
-    let songId = generateSongId(albumId, trackNum);
-    const metadata = await parseFile(file.path);
     if (metadata.common.picture && metadata.common.picture.length > 0) {
       coverBuffer = metadata.common.picture[0].data;
       coverMime = metadata.common.picture[0].format;
     }
 
+    // Generate unique song ID
+    const songId = uuidv4();
+
     // Upload song to R2
-    const songKey = `songs/${songId}_${uuidv4()}${path.extname(file.originalname)}`;
+    const songKey = `songs/${songId}_${file.originalname}`;
     await s3.upload({
       Bucket: R2_BUCKET,
       Key: songKey,
@@ -67,8 +68,9 @@ app.post('/upload', upload.single('song'), async (req, res) => {
 
     // Upload cover to R2 (if present)
     let coverUrl = null;
-    if (coverBuffer) {
-      const coverKey = `covers/${songId}_${uuidv4()}`;
+    if (coverBuffer && coverMime) {
+      const ext = coverMime.split('/')[1] || 'jpg';
+      const coverKey = `covers/${songId}.${ext}`;
       await s3.upload({
         Bucket: R2_BUCKET,
         Key: coverKey,
@@ -78,15 +80,29 @@ app.post('/upload', upload.single('song'), async (req, res) => {
       coverUrl = `${R2_ENDPOINT}/${R2_BUCKET}/${coverKey}`;
     }
 
-    // Save metadata
+    // Prepare song metadata
     const songMeta = {
       id: songId,
-      albumId,
-      title,
-      songUrl,
-      coverUrl,
+      title: title || file.originalname,
+      artist: artist || 'Unknown',
+      album: album || 'Unknown',
+      url: songUrl,
+      coverUrl: coverUrl,
     };
     songs.push(songMeta);
+
+    // Update songs_metadata.json
+    const metadataPath = path.join(__dirname, 'songs_metadata.json');
+    let songsList = [];
+    if (fs.existsSync(metadataPath)) {
+      try {
+        songsList = JSON.parse(fs.readFileSync(metadataPath, 'utf-8'));
+      } catch (e) {
+        songsList = [];
+      }
+    }
+    songsList.push(songMeta);
+    fs.writeFileSync(metadataPath, JSON.stringify(songsList, null, 2));
 
     // Cleanup
     fs.unlinkSync(file.path);
